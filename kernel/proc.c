@@ -312,6 +312,9 @@ fork(void)
 
   pid = np->pid;
 
+  // >>> 新增：trace 掩码继承规则
+  np->trace_mask = p->trace_mask;   // 父调过 trace 就复制，否则天然为 0
+
   release(&np->lock);
 
   acquire(&wait_lock);

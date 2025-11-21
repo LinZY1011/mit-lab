@@ -1,0 +1,49 @@
+# Inspect a user-process page table
+
+按照 `pgtbltest` 给出的首尾十个虚拟页打印结果，对每个条目的含义如下：
+
+1. `va 0x0 -> pa 0x87F22000, perm 0x5B`
+   - 映射到用户代码页，允许用户读/执行，禁止写；`A` 置位表示已经被取指。
+2. `va 0x1000 -> pa 0x87F1F000, perm 0x1B`
+   - 仍是文本段或只读常量，用户只读/执行。
+3. `va 0x2000 -> pa 0x87F1E000, perm 0x17`
+   - 可读写的数据段（包含 .data/.bss），用户可访问不可执行。
+4. `va 0x3000 -> pa 0x87F1D000, perm 0x07`
+   - 只给内核读写的页（U=0），被用作内核与进程共享的元数据；用户态访问会 fault。
+5. `va 0x4000 -> pa 0x87F1C000, perm 0xD7`
+   - 用户堆或栈的可读写页，`A/D` 表示已经访问且被写过。
+6-15. `va 0x5000` … `0xFFFFD000`
+   - `pte=0` 说明这些虚拟页未映射，访问会触发 page fault。
+16. `va 0xFFFFE000 -> pa 0x87F42000, perm 0xC7`
+   - 用户 trapframe 保存陷入内核时的寄存器，只有内核读写（U=0），`A/D` 说明已经使用。
+17. `va 0xFFFFF000 -> pa 0x80006000, perm 0x4B`
+   - trampoline 代码页，只读可执行；用户可跳转进入但不能写。
+
+这些条目共同展示了：低地址存放用户程序的代码/数据/堆，最顶端两个页分别是 trapframe 和 trampoline。
+
+---
+# Speed up system calls
+
+除了 `getpid()`，还可以将以下无参或只读系统调用结果缓存在 USYSCALL：
+
+- `getppid()`：在 `fork()` 时内核写入父 pid，用户直接读。
+- `uptime()`：在时钟中断里把 `ticks` 复制到共享页，用户态读走即可。
+- `sysinfo()` 中的静态计数（空闲页数、进程数等）也可放入共享页，由内核定期刷新。
+
+这些调用都无需读取用户提供的缓冲区，只返回内核维护的快照，适合通过共享只读页避免频繁的陷入/返回开销。
+
+---
+# Print a page table
+
+`vmprint()` 的叶子节点和其含义：
+
+- `0x0000000000000000`：用户文本段首页（`perm=R|X|U`），与 `print_pgtbl` 中的第一条完全对应。
+- `0x0000000000001000`：仍是文本/常量页（`R|X|U`），对应第二条。
+- `0x0000000000002000`：用户数据或堆（`R|W|U`），对应第三条。
+- `0x0000000000003000`：仅内核可见的共享页（`R|W`），同 `print_pgtbl` 的第四条。
+- `0x0000000000004000`：用户堆页（`R|W|U`），与第五条一致。
+- `0xffffffffffffd000`：USYSCALL 共享页，用户只读，承载 `struct usyscall`。
+- `0xffffffffffffe000`：TRAPFRAME 保存现场，只允许内核读写。
+- `0xfffffffffffff000`：TRAMPOLINE 代码页，`R|X`，供用户/内核切换使用。
+
+可以看到，`vmprint` 中的每个叶子都能在 `print_pgtbl` 的输出里找到相同的物理页号与权限，只是 `vmprint` 额外展示了页表树的层级关系，因此更容易将高地址的 USYSCALL、TRAPFRAME、TRAMPOLINE 映射与实际用途联系起来。

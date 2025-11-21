@@ -23,11 +23,45 @@ struct {
   struct run *freelist;
 } kmem;
 
+#ifdef LAB_PGTBL
+#define SUPERPOOL_PAGES 8   // 预留的超页数量，够实验使用即可
+
+struct superrun {
+  struct superrun *next;
+};
+
+static void superfreerange(void *pa_start, void *pa_end);
+void superfree(void *pa);
+
+struct {
+  struct spinlock lock;
+  struct superrun *freelist;
+} superkmem;
+#endif
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+#ifdef LAB_PGTBL
+  initlock(&superkmem.lock, "superkmem");
+  uint64 super_end = SUPERPGROUNDDOWN(PHYSTOP);
+  uint64 super_start = PHYSTOP;
+  uint64 min_start = SUPERPGROUNDUP((uint64)end);
+  uint64 reserve = (uint64)SUPERPOOL_PAGES * SUPERPGSIZE;
+  if(super_end > min_start && reserve > 0) {
+    if(super_end > reserve + min_start)
+      super_start = super_end - reserve;
+    else
+      super_start = min_start;
+    superfreerange((void*)super_start, (void*)super_end);
+  }
+  freerange(end, (void*)super_start);
+  if(super_start < super_end && super_end < PHYSTOP)
+    freerange((void*)super_end, (void*)PHYSTOP);
+#else
   freerange(end, (void*)PHYSTOP);
+#endif
 }
 
 void
@@ -80,3 +114,47 @@ kalloc(void)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
 }
+
+#ifdef LAB_PGTBL
+static void
+superfreerange(void *pa_start, void *pa_end)
+{
+  char *p;
+  p = (char*)SUPERPGROUNDUP((uint64)pa_start);
+  for(; p + SUPERPGSIZE <= (char*)pa_end; p += SUPERPGSIZE)
+    superfree(p);
+}
+
+void
+superfree(void *pa)
+{
+  struct superrun *r;
+
+  if(((uint64)pa % SUPERPGSIZE) != 0 || (char*)pa < end || (uint64)pa + SUPERPGSIZE > PHYSTOP)
+    panic("superfree");
+
+  memset(pa, 1, SUPERPGSIZE);
+  r = (struct superrun*)pa;
+
+  acquire(&superkmem.lock);
+  r->next = superkmem.freelist;
+  superkmem.freelist = r;
+  release(&superkmem.lock);
+}
+
+void *
+superalloc(void)
+{
+  struct superrun *r;
+
+  acquire(&superkmem.lock);
+  r = superkmem.freelist;
+  if(r)
+    superkmem.freelist = r->next;
+  release(&superkmem.lock);
+
+  if(r)
+    memset((char*)r, 5, SUPERPGSIZE);
+  return (void*)r;
+}
+#endif

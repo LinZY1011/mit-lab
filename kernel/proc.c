@@ -136,6 +136,8 @@ found:
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
     freeproc(p);
+  // Drop any alarm configuration associated with the exiting process.
+  p->alarm_interval = 0;
     release(&p->lock);
     return 0;
   }
@@ -145,6 +147,13 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+
+  // Initialize alarm bookkeeping so processes opt-in explicitly.
+  p->alarm_interval = 0;
+  p->alarm_ticks_left = 0;
+  p->alarm_handler = 0;
+  p->alarm_active = 0;
+  memset(&p->alarm_trapframe, 0, sizeof(p->alarm_trapframe));
 
   return p;
 }
@@ -169,6 +178,10 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->alarm_interval = 0;
+  p->alarm_ticks_left = 0;
+  p->alarm_handler = 0;
+  p->alarm_active = 0;
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -309,6 +322,13 @@ fork(void)
   np->cwd = idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
+
+  // Inherit alarm configuration but start with handler inactive in the child.
+  np->alarm_interval = p->alarm_interval;
+  np->alarm_ticks_left = p->alarm_ticks_left;
+  np->alarm_handler = p->alarm_handler;
+  np->alarm_active = 0;
+  np->alarm_trapframe = p->alarm_trapframe;
 
   pid = np->pid;
 

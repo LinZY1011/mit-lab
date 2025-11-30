@@ -21,6 +21,8 @@ int dup(int);
 int getpid(void);
 char* sbrk(int);
 int sleep(int);
+int sigalarm(int ticks, void (*handler)()); // request periodic user-level alarm handler
+int sigreturn(void);                        // resume execution after handling an alarm
 int uptime(void);
 
 // ulib.c

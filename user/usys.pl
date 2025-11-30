@@ -35,4 +35,6 @@ entry("dup");
 entry("getpid");
 entry("sbrk");
 entry("sleep");
+entry("sigalarm");
+entry("sigreturn");
 entry("uptime");

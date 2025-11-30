@@ -57,6 +57,7 @@ sys_sleep(void)
   argint(0, &n);
   if(n < 0)
     n = 0;
+  backtrace(); // dump call stack for the traps lab's bttest diagnostic
   acquire(&tickslock);
   ticks0 = ticks;
   while(ticks - ticks0 < n){
@@ -68,6 +69,51 @@ sys_sleep(void)
   }
   release(&tickslock);
   return 0;
+}
+
+// Configure a handler that runs every 'ticks' timer interrupts.
+uint64
+sys_sigalarm(void)
+{
+  int ticks;
+  uint64 handler;
+
+  argint(0, &ticks);
+  argaddr(1, &handler);
+  if(ticks < 0)
+    ticks = 0; // negative intervals are treated as disabling the alarm
+
+  struct proc *p = myproc();
+  acquire(&p->lock);
+  p->alarm_interval = ticks;
+  p->alarm_handler = handler;
+  if(ticks > 0){
+    p->alarm_ticks_left = ticks;
+  } else {
+    p->alarm_ticks_left = 0;
+    p->alarm_active = 0;
+  }
+  release(&p->lock);
+  return 0;
+}
+
+// Return from the user alarm handler by restoring the saved context.
+uint64
+sys_sigreturn(void)
+{
+  struct proc *p = myproc();
+  uint64 retval = 0;
+
+  acquire(&p->lock);
+  if(p->alarm_active){
+    retval = p->alarm_trapframe.a0; // return whatever a0 held when the timer interrupt fired
+    *(p->trapframe) = p->alarm_trapframe;
+    p->alarm_active = 0;
+    if(p->alarm_interval > 0)
+      p->alarm_ticks_left = p->alarm_interval;
+  }
+  release(&p->lock);
+  return retval;
 }
 
 uint64

@@ -59,6 +59,26 @@ printptr(uint64 x)
     consputc(digits[x >> (sizeof(uint64) * 8 - 4)]);
 }
 
+// Walk the frame-pointer chain and print each saved return address.
+void
+backtrace(void)
+{
+  uint64 fp = r_fp();
+  uint64 stack_lo = PGROUNDDOWN(fp);
+  uint64 stack_hi = stack_lo + PGSIZE;
+
+  printf("backtrace:\n");
+  while(fp && fp >= stack_lo + 16 && fp < stack_hi){
+    uint64 ra = *((uint64*)(fp - 8));
+    printf("%p\n", (void*)ra);
+
+    uint64 prev_fp = *((uint64*)(fp - 16));
+    if(prev_fp == 0 || PGROUNDDOWN(prev_fp) != stack_lo)
+      break; // reached the base of this kernel stack
+    fp = prev_fp;
+  }
+}
+
 // Print to the console.
 int
 printf(char *fmt, ...)
@@ -107,7 +127,7 @@ printf(char *fmt, ...)
       printint(va_arg(ap, uint64), 16, 0);
       i += 2;
     } else if(c0 == 'p'){
-      printptr(va_arg(ap, uint64));
+      printptr((uint64)va_arg(ap, void*));
     } else if(c0 == 's'){
       if((s = va_arg(ap, char*)) == 0)
         s = "(null)";
@@ -165,6 +185,7 @@ panic(char *s)
   pr.locking = 0;
   printf("panic: ");
   printf("%s\n", s);
+  backtrace(); // include a kernel stack dump in every panic
   panicked = 1; // freeze uart output from other CPUs
   for(;;)
     ;

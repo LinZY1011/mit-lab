@@ -104,4 +104,9 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  int alarm_interval;          // requested number of ticks between alarms
+  int alarm_ticks_left;        // countdown until the next alarm fires
+  uint64 alarm_handler;        // user-space PC to jump to when alarm triggers
+  int alarm_active;            // prevents nested alarms while handler runs
+  struct trapframe alarm_trapframe; // saved user context for sigreturn
 };

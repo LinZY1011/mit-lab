@@ -26,6 +26,17 @@ netinit(void)
 }
 
 
+#define NSOCK 16
+
+struct sock {
+  int port; // 0 if unused
+  char *bufs[16]; // Circular buffer
+  int lens[16];
+  int r, w; // read/write indices
+};
+
+struct sock sockets[NSOCK];
+
 //
 // bind(int port)
 // prepare to receive UDP packets address to the port,
@@ -34,10 +45,27 @@ netinit(void)
 uint64
 sys_bind(void)
 {
-  //
-  // Your code here.
-  //
+  int port;
+  argint(0, &port);
 
+  acquire(&netlock);
+  for(int i = 0; i < NSOCK; i++){
+    if(sockets[i].port == port){
+      release(&netlock);
+      return -1;
+    }
+  }
+
+  for(int i = 0; i < NSOCK; i++){
+    if(sockets[i].port == 0){
+      sockets[i].port = port;
+      sockets[i].r = 0;
+      sockets[i].w = 0;
+      release(&netlock);
+      return 0;
+    }
+  }
+  release(&netlock);
   return -1;
 }
 
@@ -74,10 +102,70 @@ sys_unbind(void)
 uint64
 sys_recv(void)
 {
-  //
-  // Your code here.
-  //
-  return -1;
+  int dport;
+  uint64 src_addr;
+  uint64 sport_addr;
+  uint64 buf_addr;
+  int maxlen;
+
+  argint(0, &dport);
+  argaddr(1, &src_addr);
+  argaddr(2, &sport_addr);
+  argaddr(3, &buf_addr);
+  argint(4, &maxlen);
+
+  struct sock *s = 0;
+  acquire(&netlock);
+  for(int i = 0; i < NSOCK; i++){
+    if(sockets[i].port == dport){
+      s = &sockets[i];
+      break;
+    }
+  }
+
+  if(s == 0){
+    release(&netlock);
+    return -1;
+  }
+
+  while(s->r == s->w){
+    if(killed(myproc())){
+      release(&netlock);
+      return -1;
+    }
+    sleep(s, &netlock);
+  }
+
+  char *buf = s->bufs[s->r];
+  // int len = s->lens[s->r];
+  s->r = (s->r + 1) % 16;
+
+  release(&netlock);
+
+  struct eth *eth = (struct eth *)buf;
+  struct ip *ip = (struct ip *)(eth + 1);
+  struct udp *udp = (struct udp *)(ip + 1);
+  char *payload = (char *)(udp + 1);
+  int payload_len = ntohs(udp->ulen) - sizeof(struct udp);
+
+  uint32 src_ip = ntohl(ip->ip_src);
+  uint16 src_port = ntohs(udp->sport);
+
+  if(copyout(myproc()->pagetable, src_addr, (char*)&src_ip, sizeof(src_ip)) < 0 ||
+     copyout(myproc()->pagetable, sport_addr, (char*)&src_port, sizeof(src_port)) < 0){
+       kfree(buf);
+       return -1;
+  }
+
+  int n = payload_len;
+  if(n > maxlen) n = maxlen;
+  if(copyout(myproc()->pagetable, buf_addr, payload, n) < 0){
+    kfree(buf);
+    return -1;
+  }
+
+  kfree(buf);
+  return n;
 }
 
 // This code is lifted from FreeBSD's ping.c, and is copyright by the Regents
@@ -188,10 +276,42 @@ ip_rx(char *buf, int len)
     printf("ip_rx: received an IP packet\n");
   seen_ip = 1;
 
-  //
-  // Your code here.
-  //
-  
+  struct eth *eth = (struct eth *)buf;
+  struct ip *ip = (struct ip *)(eth + 1);
+
+  if(ip->ip_p != IPPROTO_UDP){
+    kfree(buf);
+    return;
+  }
+
+  struct udp *udp = (struct udp *)(ip + 1);
+  uint16 dport = ntohs(udp->dport);
+
+  acquire(&netlock);
+  struct sock *s = 0;
+  for(int i = 0; i < NSOCK; i++){
+    if(sockets[i].port == dport){
+      s = &sockets[i];
+      break;
+    }
+  }
+
+  if(s){
+    if((s->w + 1) % 16 == s->r){
+      // Full
+      release(&netlock);
+      kfree(buf);
+    } else {
+      s->bufs[s->w] = buf;
+      s->lens[s->w] = len;
+      s->w = (s->w + 1) % 16;
+      wakeup(s);
+      release(&netlock);
+    }
+  } else {
+    release(&netlock);
+    kfree(buf);
+  }
 }
 
 //

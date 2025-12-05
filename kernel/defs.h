@@ -9,6 +9,7 @@ struct inode;
 struct pipe;
 struct proc;
 struct spinlock;
+struct rwspinlock;
 struct sleeplock;
 struct stat;
 struct superblock;
@@ -122,6 +123,11 @@ void            release(struct spinlock*);
 void            push_off(void);
 void            pop_off(void);
 int             atomic_read4(int *addr);
+void            initrwlock(struct rwspinlock*);
+void            read_acquire(struct rwspinlock*);
+void            read_release(struct rwspinlock*);
+void            write_acquire(struct rwspinlock*);
+void            write_release(struct rwspinlock*);
 #ifdef LAB_LOCK
 void            freelock(struct spinlock*);
 #endif

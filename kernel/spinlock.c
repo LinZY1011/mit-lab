@@ -215,3 +215,77 @@ statslock(char *buf, int sz) {
   return n;
 }
 #endif
+
+// 初始化读写锁
+void
+initrwlock(struct rwspinlock *rwlk)
+{
+  initlock(&rwlk->lock, "rwlock");
+  rwlk->readers = 0;
+  rwlk->writer_waiting = 0;
+  rwlk->writer = 0;
+}
+
+// 获取读锁
+void
+read_acquire(struct rwspinlock *rwlk)
+{
+  acquire(&rwlk->lock);
+  
+  // 如果有写者在等待或写者持有锁，读者需要等待
+  // 这实现了写者优先策略，防止写者饥饿
+  while(rwlk->writer_waiting > 0 || rwlk->writer) {
+    release(&rwlk->lock);
+    acquire(&rwlk->lock);
+  }
+  
+  // 增加读者计数
+  rwlk->readers++;
+  release(&rwlk->lock);
+}
+
+// 释放读锁
+void
+read_release(struct rwspinlock *rwlk)
+{
+  acquire(&rwlk->lock);
+  
+  // 减少读者计数
+  rwlk->readers--;
+  
+  release(&rwlk->lock);
+}
+
+// 获取写锁
+void
+write_acquire(struct rwspinlock *rwlk)
+{
+  acquire(&rwlk->lock);
+  
+  // 增加等待写者计数（实现写者优先）
+  rwlk->writer_waiting++;
+  
+  // 等待所有读者和其他写者释放锁
+  while(rwlk->readers > 0 || rwlk->writer) {
+    release(&rwlk->lock);
+    acquire(&rwlk->lock);
+  }
+  
+  // 获取写锁
+  rwlk->writer_waiting--;
+  rwlk->writer = 1;
+  
+  release(&rwlk->lock);
+}
+
+// 释放写锁
+void
+write_release(struct rwspinlock *rwlk)
+{
+  acquire(&rwlk->lock);
+  
+  // 释放写锁
+  rwlk->writer = 0;
+  
+  release(&rwlk->lock);
+}

@@ -18,15 +18,24 @@ struct run {
   struct run *next;
 };
 
+// 为每个CPU维护独立的freelist和锁，减少锁竞争
+// 每个CPU的锁名需要持久化存储
+char kmem_lock_names[NCPU][8];
+
 struct {
   struct spinlock lock;
   struct run *freelist;
-} kmem;
+} kmem[NCPU];
 
 void
 kinit()
 {
-  initlock(&kmem.lock, "kmem");
+  // 初始化每个CPU的锁，使用不同的名字以便调试
+  // 锁名必须以"kmem"开头，用于统计跟踪
+  for(int i = 0; i < NCPU; i++) {
+    snprintf(kmem_lock_names[i], sizeof(kmem_lock_names[i]), "kmem%d", i);
+    initlock(&kmem[i].lock, kmem_lock_names[i]);
+  }
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -56,10 +65,17 @@ kfree(void *pa)
 
   r = (struct run*)pa;
 
-  acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+  // 关闭中断以安全地获取当前CPU ID
+  push_off();
+  int cpu = cpuid();
+  
+  // 将页面释放到当前CPU的freelist
+  acquire(&kmem[cpu].lock);
+  r->next = kmem[cpu].freelist;
+  kmem[cpu].freelist = r;
+  release(&kmem[cpu].lock);
+  
+  pop_off();
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -70,11 +86,47 @@ kalloc(void)
 {
   struct run *r;
 
-  acquire(&kmem.lock);
-  r = kmem.freelist;
+  // 关闭中断以安全地获取当前CPU ID
+  push_off();
+  int cpu = cpuid();
+  
+  // 首先尝试从当前CPU的freelist分配
+  acquire(&kmem[cpu].lock);
+  r = kmem[cpu].freelist;
   if(r)
-    kmem.freelist = r->next;
-  release(&kmem.lock);
+    kmem[cpu].freelist = r->next;
+  release(&kmem[cpu].lock);
+
+  // 如果当前CPU的freelist为空，尝试从其他CPU"偷取"
+  if(!r) {
+    for(int i = 0; i < NCPU; i++) {
+      int victim = (cpu + 1 + i) % NCPU;
+      if(victim == cpu)
+        continue;
+      
+      acquire(&kmem[victim].lock);
+      struct run *head = kmem[victim].freelist;
+      if(head) {
+        // 偷取整个链表，以最小化持有锁的时间
+        kmem[victim].freelist = 0;
+        release(&kmem[victim].lock);
+        
+        r = head;
+        
+        // 将剩余的页面加入当前CPU的freelist
+        if(head->next) {
+          acquire(&kmem[cpu].lock);
+          kmem[cpu].freelist = head->next;
+          release(&kmem[cpu].lock);
+        }
+        
+        break;
+      }
+      release(&kmem[victim].lock);
+    }
+  }
+  
+  pop_off();
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk

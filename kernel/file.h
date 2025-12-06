@@ -14,6 +14,7 @@ struct file {
 #define	mkdev(m,n)  ((uint)((m)<<16| (n)))
 
 // in-memory copy of an inode
+// 必须与dinode结构的addrs数组大小一致
 struct inode {
   uint dev;           // Device number
   uint inum;          // Inode number
@@ -26,7 +27,7 @@ struct inode {
   short minor;
   short nlink;
   uint size;
-  uint addrs[NDIRECT+1];
+  uint addrs[NDIRECT+2];  // 11 direct + 1 indirect + 1 double indirect
 };
 
 // map major device number to device functions.

@@ -385,6 +385,7 @@ bmap(struct inode *ip, uint bn)
   uint addr, *a;
   struct buf *bp;
 
+  // 处理前11个直接块
   if(bn < NDIRECT){
     if((addr = ip->addrs[bn]) == 0){
       addr = balloc(ip->dev);
@@ -396,6 +397,8 @@ bmap(struct inode *ip, uint bn)
   }
   bn -= NDIRECT;
 
+  // 处理单间接块（第12个位置，即NDIRECT）
+  // 单间接块可以容纳256个块号，映射第12-267块
   if(bn < NINDIRECT){
     // Load indirect block, allocating if necessary.
     if((addr = ip->addrs[NDIRECT]) == 0){
@@ -416,6 +419,53 @@ bmap(struct inode *ip, uint bn)
     brelse(bp);
     return addr;
   }
+  bn -= NINDIRECT;
+
+  // 处理双间接块（第13个位置，即NDIRECT+1）
+  // 双间接块可以容纳256个单间接块的指针
+  // 每个单间接块可以容纳256个数据块指针
+  // 总共可以映射256*256 = 65536个块，映射第268-65803块
+  if(bn < NINDIRECT * NINDIRECT){
+    // 双间接块的第一级索引（256个单间接块）
+    uint dbladdr;
+    if((dbladdr = ip->addrs[NDIRECT+1]) == 0){
+      dbladdr = balloc(ip->dev);
+      if(dbladdr == 0)
+        return 0;
+      ip->addrs[NDIRECT+1] = dbladdr;
+    }
+    // 读取双间接块，它包含256个单间接块的指针
+    bp = bread(ip->dev, dbladdr);
+    a = (uint*)bp->data;
+    // 计算这个逻辑块在256个单间接块中的索引
+    uint idx = bn / NINDIRECT;  // 第一级索引
+    uint offset = bn % NINDIRECT;  // 第二级索引
+    
+    // 如果这个单间接块的指针不存在，分配一个新的单间接块
+    if((addr = a[idx]) == 0){
+      addr = balloc(ip->dev);
+      if(addr == 0){
+        brelse(bp);
+        return 0;
+      }
+      a[idx] = addr;
+      log_write(bp);
+    }
+    brelse(bp);
+    
+    // 现在读取单间接块，并在其中查找或分配实际的数据块
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+    if((addr = a[offset]) == 0){
+      addr = balloc(ip->dev);
+      if(addr){
+        a[offset] = addr;
+        log_write(bp);
+      }
+    }
+    brelse(bp);
+    return addr;
+  }
 
   panic("bmap: out of range");
 }
@@ -426,9 +476,10 @@ void
 itrunc(struct inode *ip)
 {
   int i, j;
-  struct buf *bp;
-  uint *a;
+  struct buf *bp, *bp2;
+  uint *a, *a2;
 
+  // 释放前11个直接块
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
       bfree(ip->dev, ip->addrs[i]);
@@ -436,6 +487,7 @@ itrunc(struct inode *ip)
     }
   }
 
+  // 释放单间接块及其包含的数据块
   if(ip->addrs[NDIRECT]){
     bp = bread(ip->dev, ip->addrs[NDIRECT]);
     a = (uint*)bp->data;
@@ -446,6 +498,33 @@ itrunc(struct inode *ip)
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+  }
+
+  // 释放双间接块及其包含的所有单间接块和数据块
+  if(ip->addrs[NDIRECT+1]){
+    // 读取双间接块
+    bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
+    a = (uint*)bp->data;
+    // 遍历双间接块中的256个单间接块指针
+    for(i = 0; i < NINDIRECT; i++){
+      if(a[i]){
+        // 读取第i个单间接块
+        bp2 = bread(ip->dev, a[i]);
+        a2 = (uint*)bp2->data;
+        // 释放该单间接块包含的所有数据块
+        for(j = 0; j < NINDIRECT; j++){
+          if(a2[j])
+            bfree(ip->dev, a2[j]);
+        }
+        brelse(bp2);
+        // 释放单间接块本身
+        bfree(ip->dev, a[i]);
+      }
+    }
+    brelse(bp);
+    // 释放双间接块本身
+    bfree(ip->dev, ip->addrs[NDIRECT+1]);
+    ip->addrs[NDIRECT+1] = 0;
   }
 
   ip->size = 0;

@@ -301,14 +301,56 @@ create(char *path, short type, short major, short minor)
   return 0;
 }
 
+// 创建符号链接系统调用
+// symlink(target, path) 在path创建指向target的符号链接
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+  int n;
+
+  // 获取两个参数：target和path
+  if((n = argstr(0, target, MAXPATH)) < 0 || (n = argstr(1, path, MAXPATH)) < 0)
+    return -1;
+
+  begin_op();
+  
+  // 使用create创建一个新的T_SYMLINK类型的inode
+  ip = create(path, T_SYMLINK, 0, 0);
+  if(ip == 0){
+    end_op();
+    return -1;
+  }
+
+  // 将目标路径写入符号链接的数据块
+  // 将target内容写入到inode的数据中，目标路径长度通常很短
+  if(writei(ip, 0, (uint64)target, 0, strlen(target)) < 0){
+    ip->nlink = 0;
+    iupdate(ip);
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  // 设置inode的大小为目标路径的长度
+  ip->size = strlen(target);
+  iupdate(ip);
+  iunlockput(ip);
+
+  end_op();
+  return 0;
+}
+
 uint64
 sys_open(void)
 {
-  char path[MAXPATH];
+  char path[MAXPATH], sympath[MAXPATH];
   int fd, omode;
   struct file *f;
   struct inode *ip;
   int n;
+  int symlink_depth = 0;  // 追踪符号链接深度，防止循环
 
   argint(1, &omode);
   if((n = argstr(0, path, MAXPATH)) < 0)
@@ -323,11 +365,40 @@ sys_open(void)
       return -1;
     }
   } else {
-    if((ip = namei(path)) == 0){
-      end_op();
-      return -1;
+    // 循环跟随符号链接直到找到非符号链接的文件
+    while(1){
+      if((ip = namei(path)) == 0){
+        end_op();
+        return -1;
+      }
+      ilock(ip);
+      
+      // 如果不是符号链接，或者指定了O_NOFOLLOW标志，则停止跟随
+      if(ip->type != T_SYMLINK || (omode & O_NOFOLLOW)){
+        break;
+      }
+      
+      // 检查符号链接的深度，防止循环链接
+      if(symlink_depth >= 10){
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+      
+      // 从符号链接的inode中读取目标路径
+      if(readi(ip, 0, (uint64)sympath, 0, MAXPATH) <= 0){
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+      
+      iunlockput(ip);
+      
+      // 更新path为目标路径，继续循环
+      memmove(path, sympath, MAXPATH);
+      symlink_depth++;
     }
-    ilock(ip);
+    
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();

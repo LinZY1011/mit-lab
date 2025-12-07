@@ -26,6 +26,8 @@ int getpid(void);
 char* sbrk(int);
 int sleep(int);
 int uptime(void);
+void* mmap(void*, int, int, int, int, int); // 添加这一行
+int munmap(void*, int);                     // 添加这一行
 #ifdef LAB_NET
 int bind(uint16);
 int unbind(uint16);

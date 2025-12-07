@@ -15,6 +15,11 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
+
+#ifndef PTE_D
+#define PTE_D (1L << 7)
+#endif
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -501,5 +506,134 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr;
+  int length, prot, flags, fd, offset;
+  struct file *f;
+  struct proc *p = myproc();
+  struct vma *v = 0;
+
+  // Don't check return value of void functions
+  argaddr(0, &addr);
+  argint(1, &length);
+  argint(2, &prot);
+  argint(3, &flags);
+  if(argfd(4, &fd, &f) < 0) 
+    return -1;
+  argint(5, &offset);
+
+  if(!f->writable && (prot & PROT_WRITE) && (flags == MAP_SHARED))
+    return -1;
+    
+  // Find unused VMA
+  for(int i = 0; i < 16; i++){
+    if(!p->vma[i].used){
+      v = &p->vma[i];
+      break;
+    }
+  }
+  if(!v) return -1;
+
+  // Find a hole.
+  uint64 base_addr = 0xC0000000;
+  uint64 va = base_addr;
+  while(1) {
+    int overlaps = 0;
+    uint64 va_end = va + length;
+    for(int i=0; i<16; i++){
+      if(p->vma[i].used){
+        uint64 v_start = p->vma[i].addr;
+        uint64 v_end = v_start + p->vma[i].length;
+        if(va < v_end && va_end > v_start){
+          overlaps = 1;
+          va = PGROUNDUP(v_end); 
+          break;
+        }
+      }
+    }
+    if(!overlaps) break;
+  }
+  
+  v->used = 1;
+  v->addr = va;
+  v->length = length;
+  v->prot = prot;
+  v->flags = flags;
+  v->fd = fd;
+  v->f = f;
+  v->offset = offset;
+  
+  filedup(f);
+  
+  return v->addr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int length;
+  struct proc *p = myproc();
+  struct vma *v = 0;
+
+  argaddr(0, &addr);
+  argint(1, &length);
+
+  // Find VMA containing addr
+  for(int i=0; i<16; i++){
+    if(p->vma[i].used && addr >= p->vma[i].addr && addr < p->vma[i].addr + p->vma[i].length){
+      v = &p->vma[i];
+      break;
+    }
+  }
+  if(!v) return -1;
+
+  uint64 end = addr + length;
+  
+  for(uint64 cur = addr; cur < end; cur += PGSIZE){
+    pte_t *pte = walk(p->pagetable, cur, 0);
+    if(pte && (*pte & PTE_V)){
+      uint64 pa = PTE2PA(*pte);
+      if((v->flags == MAP_SHARED) && (*pte & PTE_D)){
+        // 计算文件中的偏移量
+        uint64 file_off = v->offset + (cur - v->addr);
+        begin_op();
+        ilock(v->f->ip);
+        
+        // 计算写入大小，避免超过文件本身的大小
+        int sz = PGSIZE;
+        if(file_off >= v->f->ip->size) {
+            sz = 0; // 超出文件尾部，不写
+        } else if(file_off + sz > v->f->ip->size) {
+            sz = v->f->ip->size - file_off; // 截断
+        }
+
+        if(sz > 0)
+            writei(v->f->ip, 0, pa, file_off, sz);
+            
+        iunlock(v->f->ip);
+        end_op();
+      }
+      uvmunmap(p->pagetable, cur, 1, 1);
+    }
+  }
+
+  // Update VMA structure
+  if(addr == v->addr && length == v->length){
+    fileclose(v->f);
+    v->used = 0;
+  } else if(addr == v->addr){
+    v->addr += length;
+    v->length -= length;
+    v->offset += length; 
+  } else if(end == v->addr + v->length){
+    v->length -= length;
+  }
+
   return 0;
 }

@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fs.h"        // 必须包含：定义 struct inode
+#include "sleeplock.h" // 必须包含：file.h 依赖
+#include "file.h"      // 必须包含：定义 struct file
+#include "fcntl.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -50,7 +54,10 @@ usertrap(void)
   // save user program counter.
   p->trapframe->epc = r_sepc();
   
-  if(r_scause() == 8){
+  uint64 scause = r_scause();
+
+  // 修复：直接使用 scause 变量，而不是调用 r_scause()
+  if(scause == 8){
     // system call
 
     if(killed(p))
@@ -67,8 +74,60 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(scause == 13 || scause == 15){ 
+    // 修复：使用 scause 变量比较 (13=Load page fault, 15=Store page fault)
+    uint64 va = r_stval();
+    struct vma *v = 0;
+    
+    // Check if VA is in a VMA
+    for(int i=0; i<16; i++){
+      if(p->vma[i].used && va >= p->vma[i].addr && va < p->vma[i].addr + p->vma[i].length){
+        v = &p->vma[i];
+        break;
+      }
+    }
+    
+    if(v){
+      // -----------------------------------------------------------
+      // 修复：检查页面是否已经映射
+      // 如果已经映射，说明是权限错误（例如写入只读页面），应杀死进程
+      pte_t *pte = walk(p->pagetable, va, 0);
+      if(pte && (*pte & PTE_V)){
+        setkilled(p);
+      } else {
+        // 页面未映射，执行 Lazy Allocation
+        va = PGROUNDDOWN(va);
+        char *mem = kalloc();
+        if(mem == 0){
+          setkilled(p);
+        } else {
+          memset(mem, 0, PGSIZE);
+          ilock(v->f->ip);
+          readi(v->f->ip, 0, (uint64)mem, v->offset + (va - v->addr), PGSIZE);
+          iunlock(v->f->ip);
+          
+          int perm = PTE_U;
+          if(v->prot & PROT_READ) perm |= PTE_R;
+          if(v->prot & PROT_WRITE) perm |= PTE_W;
+          if(v->prot & PROT_EXEC) perm |= PTE_X;
+          
+          if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, perm) != 0){
+            kfree(mem);
+            setkilled(p);
+          }
+        }
+      }
+      // -----------------------------------------------------------
+    } else { // 修复：这里之前少了一个右大括号 "}"
+      // Not a VMA, standard segfault
+      printf("usertrap(): unexpected scause 0x%lx pid=%d\n", scause, p->pid);
+      printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
+      setkilled(p);
+    }
+    
   } else {
-    printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
+    // 修复：打印 scause 变量
+    printf("usertrap(): unexpected scause 0x%lx pid=%d\n", scause, p->pid);
     printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
     setkilled(p);
   }
@@ -215,4 +274,3 @@ devintr()
     return 0;
   }
 }
-
